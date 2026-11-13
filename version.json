@@ -14,5 +14,8 @@
     "buildNumber": {
       "enabled": true
     }
+  },
+  "nugetPackageVersion": {
+    "semVer": 2
   }
 }
