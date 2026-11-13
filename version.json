@@ -1,11 +1,12 @@
 {
   "$schema": "NerdBank.GitVersioning/version.schema.json",
-  "version": "14.3",
+  "version": "14.3.19-ziltch.1",
   "assemblyVersion": {
     "precision": "revision"
   },
   "publicReleaseRefSpec": [
-    "^refs/heads/master$"
+    "^refs/heads/master$",
+    "^refs/heads/ziltch$"
   ],
   "cloudBuild": {
     "setVersionVariables": true,
