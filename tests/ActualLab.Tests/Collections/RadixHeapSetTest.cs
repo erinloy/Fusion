@@ -98,4 +98,71 @@ public class RadixHeapSetTest(ITestOutputHelper @out) : TestBase(@out)
                 minSet.Single().Value.Should().Be(i);
         }
     }
+
+    [Fact]
+    public void TickWithNothingDueAllocatesNothingTest()
+    {
+        var heap = new RadixHeapSet<int>(45);
+        for (var i = 0; i < 1000; i++)
+            heap.Add(1_000_000 + i, i);
+        heap.ExtractMinSet(1).Count.Should().Be(0);
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        var dueCount = 0;
+        for (var tick = 2; tick < 10_000; tick++)
+            dueCount += heap.ExtractMinSet(tick).Count;
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        dueCount.Should().Be(0);
+        allocated.Should().BeLessThan(1024);
+        heap.Count.Should().Be(1000);
+        heap.ExtractMinSet(1_000_000).Single().Key.Should().Be(0);
+    }
+
+    [Fact]
+    public void TickedHeapMatchesModelTest()
+    {
+        var rnd = new Random(11);
+        for (var iteration = 0; iteration < 200; iteration++) {
+            var heap = new RadixHeapSet<int>(45);
+            var model = new Dictionary<int, long>();
+            for (var tick = 0L; tick < 2000; tick++) {
+                for (var op = rnd.Next(4); op > 0; op--) {
+                    var value = rnd.Next(64);
+                    var priority = tick + rnd.Next(300);
+                    switch (rnd.Next(5)) {
+                    case 0:
+                        heap.Add(priority, value).Should().Be(model.TryAdd(value, priority));
+                        break;
+                    case 1:
+                        heap.AddOrUpdate(priority, value);
+                        model[value] = priority;
+                        break;
+                    case 2: {
+                        var expected = !model.TryGetValue(value, out var old) || old > priority;
+                        heap.AddOrUpdateToLower(priority, value).Should().Be(expected);
+                        if (expected)
+                            model[value] = priority;
+                        break;
+                    }
+                    case 3: {
+                        var expected = !model.TryGetValue(value, out var old) || old < priority;
+                        heap.AddOrUpdateToHigher(priority, value).Should().Be(expected);
+                        if (expected)
+                            model[value] = priority;
+                        break;
+                    }
+                    default:
+                        heap.Remove(value, out _).Should().Be(model.Remove(value));
+                        break;
+                    }
+                }
+                var due = model.Where(p => p.Value == tick).Select(p => p.Key).OrderBy(x => x).ToList();
+                heap.ExtractMinSet(tick).Keys.OrderBy(x => x).Should().Equal(due);
+                foreach (var value in due)
+                    model.Remove(value);
+                heap.Count.Should().Be(model.Count);
+            }
+        }
+    }
 }

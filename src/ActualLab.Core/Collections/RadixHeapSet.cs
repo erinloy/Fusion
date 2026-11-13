@@ -9,10 +9,13 @@ namespace ActualLab.Collections;
 public class RadixHeapSet<T> : IEnumerable<(long Priority, T Value)>
     where T : notnull
 {
+    private const long UnknownMin = long.MinValue;
     private static readonly Option<(long Priority, T Value)> None = Option<(long Priority, T Value)>.None;
     private static readonly Dictionary<T, long> Empty = new();
     private readonly Dictionary<T, int> _bucketIndexes;
     private readonly Dictionary<T, long>[] _buckets;
+    // Each bucket's min priority (long.MaxValue when empty), or UnknownMin until it's re-scanned
+    private readonly long[] _bucketMins;
 
     public int Count {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -25,8 +28,11 @@ public class RadixHeapSet<T> : IEnumerable<(long Priority, T Value)>
         MinPriority = minPriority;
         _bucketIndexes = new Dictionary<T, int>();
         _buckets = new Dictionary<T, long>[bucketCount];
-        for (var i = 0; i < _buckets.Length; i++)
+        _bucketMins = new long[bucketCount];
+        for (var i = 0; i < _buckets.Length; i++) {
             _buckets[i] = new Dictionary<T, long>();
+            _bucketMins[i] = long.MaxValue;
+        }
     }
 
     public RadixHeapSet(RadixHeapSet<T> other)
@@ -34,6 +40,7 @@ public class RadixHeapSet<T> : IEnumerable<(long Priority, T Value)>
         MinPriority = other.MinPriority;
         _bucketIndexes = new Dictionary<T, int>(other._bucketIndexes);
         _buckets = new Dictionary<T, long>[other._buckets.Length];
+        _bucketMins = (long[])other._bucketMins.Clone();
         for (var i = 0; i < _buckets.Length; i++)
             _buckets[i] = new Dictionary<T, long>(other._buckets[i]);
     }
@@ -61,6 +68,7 @@ public class RadixHeapSet<T> : IEnumerable<(long Priority, T Value)>
             return false;
 
         _buckets[index].Add(value, priority);
+        OnAdded(index, priority);
         return true;
     }
 
@@ -73,13 +81,17 @@ public class RadixHeapSet<T> : IEnumerable<(long Priority, T Value)>
         var bucket = _buckets[index];
         if (_bucketIndexes.TryGetValue(value, out var oldIndex)) {
             if (oldIndex == index) {
+                OnRemoved(index, bucket[value]);
                 bucket[value] = priority;
+                OnAdded(index, priority);
                 return;
             }
-            _buckets[oldIndex].Remove(value);
+            _buckets[oldIndex].Remove(value, out var oldPriority);
+            OnRemoved(oldIndex, oldPriority);
         }
         _bucketIndexes[value] = index;
         bucket.Add(value, priority);
+        OnAdded(index, priority);
     }
 
 #if NET5_0_OR_GREATER
@@ -96,6 +108,7 @@ public class RadixHeapSet<T> : IEnumerable<(long Priority, T Value)>
                     return false;
 
                 bucket[value] = priority;
+                OnAdded(index, priority);
                 return true;
             }
             else {
@@ -105,10 +118,12 @@ public class RadixHeapSet<T> : IEnumerable<(long Priority, T Value)>
                     return false;
 
                 oldBucket.Remove(value);
+                OnRemoved(oldIndex, oldPriority);
             }
         }
         _bucketIndexes[value] = index;
         bucket.Add(value, priority);
+        OnAdded(index, priority);
         return true;
     }
 
@@ -126,6 +141,7 @@ public class RadixHeapSet<T> : IEnumerable<(long Priority, T Value)>
                     return false;
 
                 bucket[value] = priority;
+                OnRemoved(index, oldPriority);
                 return true;
             }
             else {
@@ -135,10 +151,12 @@ public class RadixHeapSet<T> : IEnumerable<(long Priority, T Value)>
                     return false;
 
                 oldBucket.Remove(value);
+                OnRemoved(oldIndex, oldPriority);
             }
         }
         _bucketIndexes[value] = index;
         bucket.Add(value, priority);
+        OnAdded(index, priority);
         return true;
     }
 
@@ -152,6 +170,7 @@ public class RadixHeapSet<T> : IEnumerable<(long Priority, T Value)>
             return false;
         }
         _buckets[index].Remove(value, out priority);
+        OnRemoved(index, priority);
         return true;
     }
 
@@ -180,6 +199,8 @@ public class RadixHeapSet<T> : IEnumerable<(long Priority, T Value)>
         var result = bucket.First();
         bucket.Remove(result.Key);
         _bucketIndexes.Remove(result.Key);
+        if (bucket.Count == 0)
+            _bucketMins[0] = long.MaxValue;
         return Option.Some((result.Value, result.Key));
     }
 
@@ -201,18 +222,16 @@ public class RadixHeapSet<T> : IEnumerable<(long Priority, T Value)>
             if (bucket.Count != 0) {
                 if (index == 0)
                     throw new ArgumentOutOfRangeException(nameof(priority));
-                var minPriority = long.MaxValue;
-                foreach (var (_, p) in bucket)
-                    if (p < minPriority) minPriority = p;
+                var minPriority = GetBucketMin(index);
                 if (priority > minPriority)
                     throw new ArgumentOutOfRangeException(nameof(priority));
+                // Nothing is due yet: leaving MinPriority behind keeps every entry where it is,
+                // so a tick with nothing due copies nothing
+                if (priority < minPriority)
+                    return Empty;
+
                 MinPriority = priority;
-                _buckets[index] = new Dictionary<T, long>();
-                foreach (var (value, p) in bucket) {
-                    var i = GetBucketIndexUnchecked(p);
-                    _bucketIndexes[value] = i;
-                    _buckets[i].Add(value, p);
-                }
+                Redistribute(index);
                 return ExtractBucket0();
             }
         }
@@ -233,21 +252,29 @@ public class RadixHeapSet<T> : IEnumerable<(long Priority, T Value)>
                 if (index == 0)
                     // No need for update
                     return;
-                var minPriority = long.MaxValue;
-                foreach (var (_, p) in bucket)
-                    if (p < minPriority) minPriority = p;
-                MinPriority = minPriority;
-                _buckets[index] = new Dictionary<T, long>();
-                foreach (var (value, p) in bucket) {
-                    var i = GetBucketIndexUnchecked(p);
-                    _bucketIndexes[value] = i;
-                    _buckets[i].Add(value, p);
-                }
+                MinPriority = GetBucketMin(index);
+                Redistribute(index);
                 return;
             }
         }
         throw Errors.InternalError(
             $"{GetType().GetName()}: internal structure is corrupted.");
+    }
+
+    // Requires: buckets [0, index) are empty, and MinPriority <= the min priority of bucket[index]
+    private void Redistribute(int index)
+    {
+        var bucket = _buckets[index];
+        _buckets[index] = new Dictionary<T, long>();
+        for (var i = 0; i <= index; i++)
+            _bucketMins[i] = long.MaxValue;
+        foreach (var (value, p) in bucket) {
+            var i = GetBucketIndexUnchecked(p);
+            _bucketIndexes[value] = i;
+            _buckets[i].Add(value, p);
+            if (p < _bucketMins[i])
+                _bucketMins[i] = p;
+        }
     }
 
     private IReadOnlyDictionary<T, long> ExtractBucket0()
@@ -258,7 +285,37 @@ public class RadixHeapSet<T> : IEnumerable<(long Priority, T Value)>
             foreach (var pair in bucket)
                 _bucketIndexes.Remove(pair.Key);
         }
+        _bucketMins[0] = long.MaxValue;
         return bucket;
+    }
+
+    private long GetBucketMin(int index)
+    {
+        var min = _bucketMins[index];
+        if (min != UnknownMin)
+            return min;
+
+        min = long.MaxValue;
+        foreach (var (_, p) in _buckets[index])
+            if (p < min) min = p;
+        return _bucketMins[index] = min;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void OnAdded(int index, long priority)
+    {
+        var min = _bucketMins[index];
+        if (min != UnknownMin && priority < min)
+            _bucketMins[index] = priority;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void OnRemoved(int index, long priority)
+    {
+        if (_buckets[index].Count == 0)
+            _bucketMins[index] = long.MaxValue;
+        else if (_bucketMins[index] == priority)
+            _bucketMins[index] = UnknownMin;
     }
 
 #if NET5_0_OR_GREATER
