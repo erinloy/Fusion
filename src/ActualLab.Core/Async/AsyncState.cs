@@ -162,15 +162,26 @@ public sealed class AsyncState<T>(T value)
 
     // SetFinal & TrySetFinal
 
+    // A final error is the state's end, delivered to whoever awaits WhenNext(); nobody awaiting it is no lost error, so it is observed
+    // here (a scoped UIActionTracker ends every Blazor circuit this way, and its finalizer rethrew each as an unobserved task exception).
     public void SetFinal(Exception error)
+    {
         // ReSharper disable once PossiblyImpureMethodCallOnReadonlyVariable
-        => _nextSource.SetException(error);
+        _nextSource.SetException(error);
+        _ = _nextSource.Task.Exception;
+    }
 
     public void SetFinal(CancellationToken cancellationToken)
         => _nextSource.TrySetCanceled(cancellationToken);
 
     public bool TrySetFinal(Exception error)
-        => _nextSource.TrySetException(error);
+    {
+        if (!_nextSource.TrySetException(error))
+            return false;
+
+        _ = _nextSource.Task.Exception; // Observed, as in SetFinal
+        return true;
+    }
 
     public bool TrySetFinal(CancellationToken cancellationToken)
         => _nextSource.TrySetCanceled(cancellationToken);
