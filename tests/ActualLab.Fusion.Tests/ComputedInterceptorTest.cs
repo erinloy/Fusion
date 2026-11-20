@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using ActualLab.Fusion.Tests.Services;
 
 namespace ActualLab.Fusion.Tests;
@@ -125,5 +126,46 @@ public class ComputedInterceptorTest(ITestOutputHelper @out) : FusionTestBase(@o
 
         await taskComputed.WhenInvalidated().WaitAsync(TimeSpan.FromSeconds(1));
         await valueTaskComputed.WhenInvalidated().WaitAsync(TimeSpan.FromSeconds(1));
+    }
+
+    // ziltch prod 0000300 (11-20 12:18Z): a page GL block's run was cancelled at its budget after its caller stopped waiting
+    // (WaitAsync timed out). The value promise was a ContinueWith whose GetResult rethrew the cancel, so it faulted with
+    // "A task was canceled", nobody read it, and the finalizer raised it as an unobserved task exception.
+    [Fact]
+    public async Task ACancelledComputeAbandonedByItsCallerLeavesNoUnobservedTaskException()
+    {
+        var time = Services.GetRequiredService<ITimeService>();
+        var unobserved = 0;
+        var first = "";
+        void Note(object? _, UnobservedTaskExceptionEventArgs e)
+        {
+            if (e.Exception.Flatten().InnerExceptions.Any(x => x is OperationCanceledException)
+                && Interlocked.Increment(ref unobserved) == 1)
+                first = e.Exception.ToString();
+        }
+        TaskScheduler.UnobservedTaskException += Note;
+        try {
+            for (var i = 0; i < 8; i++)
+                await AskThenAbandon(time);
+            for (var i = 0; i < 3; i++) {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+        }
+        finally {
+            TaskScheduler.UnobservedTaskException -= Note;
+        }
+        unobserved.Should().Be(0, first);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static async Task AskThenAbandon(ITimeService time)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(20));
+        var asked = time.GetTimeWithDelay(cts.Token);
+        // the caller stops waiting first, as a WaitAsync past its budget does, and never reads the task again
+        try { await asked.WaitAsync(TimeSpan.FromMilliseconds(5)); } catch (TimeoutException) { } catch (OperationCanceledException) { }
+        await Task.Delay(300);
+        asked.IsCompleted.Should().BeTrue();
     }
 }

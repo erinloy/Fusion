@@ -57,15 +57,15 @@ public static class ComputeFunctionExt
     {
         [UnconditionalSuppressMessage("Trimming", "IL2060", Justification = "We assume Task<T> methods are preserved")]
         public override object Generate()
-            => static (Task<Computed> computedTask) => {
-                var resultTask = computedTask.ContinueWith(
-                    static t => {
-                        var computed = t.GetAwaiter().GetResult();
-                        return (T)computed.UntypedOutput.Value!;
-                    },
-                    CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-                return resultTask;
-            };
+            => static (Task<Computed> computedTask) => ValueOf(computedTask);
+
+        // An await, not a ContinueWith: a cancelled compute leaves this Canceled, not Faulted with "A task was canceled",
+        // so a caller that stopped waiting (it timed out) leaves no unobserved task exception for the finalizer.
+        internal static async Task<T> ValueOf(Task<Computed> computedTask)
+        {
+            var computed = await computedTask.ConfigureAwait(false);
+            return (T)computed.UntypedOutput.Value!;
+        }
     }
 
     /// <summary>
@@ -76,14 +76,7 @@ public static class ComputeFunctionExt
     {
         [UnconditionalSuppressMessage("Trimming", "IL2060", Justification = "We assume Task<T> methods are preserved")]
         public override object Generate()
-            => static (Task<Computed> computedTask, ComputedSynchronizer computedSynchronizer, CancellationToken cancellationToken) => {
-                var resultTask = computedSynchronizer.Synchronize(computedTask, cancellationToken).ContinueWith(
-                    static t => {
-                        var computed = t.GetAwaiter().GetResult();
-                        return (T)computed.UntypedOutput.Value!;
-                    },
-                    CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-                return resultTask;
-            };
+            => static (Task<Computed> computedTask, ComputedSynchronizer computedSynchronizer, CancellationToken cancellationToken)
+                => CompleteProduceValuePromiseFactory<T>.ValueOf(computedSynchronizer.Synchronize(computedTask, cancellationToken));
     }
 }
